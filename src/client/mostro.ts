@@ -1,12 +1,12 @@
 import { EventEmitter } from 'tseep';
-import { NDKEvent } from '@nostr-dev-kit/ndk';
-import { Nostr } from '../utils/nostr';
-import { Action, NewOrder, Order, MostroInfo, MostroMessage, OrderStatus, OrderType } from '../types/core';
-import { GiftWrap, Rumor, Seal } from '../types/core/nostr';
+import { NDKEvent, NDKSubscription } from '@nostr-dev-kit/ndk';
+import { Nostr, OrderFilters } from '../utils/nostr';
+import { Action, NewOrder, Order, MostroInfo, MostroMessage, OrderStatus } from '../types/core';
 import { extractOrderFromEvent, prepareNewOrder } from '../core/order';
 import { KeyManager } from '../utils/key-manager';
 
-const REQUEST_TIMEOUT = 30000; // 30 seconds
+const DEFAULT_RELAYS = ['wss://nostr.orangepill.dev', 'wss://relay.orangepill.dev', 'wss://nostr.zebedee.cloud'];
+const REQUEST_TIMEOUT = 10000; // 10 seconds
 
 interface PendingRequest {
   resolve: (value: MostroMessage) => void;
@@ -14,21 +14,36 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
-export interface MostroEvents {
-  ready: () => void;
-  'order-update': (order: Order, ev: NDKEvent) => void;
-  'info-update': (info: MostroInfo) => void;
-  'mostro-message': (message: MostroMessage, ev: NDKEvent) => void;
-  'peer-message': (gift: GiftWrap, seal: Seal, rumor: Rumor) => void;
+type MostroEvents = {
+  'order-update': (order: Order, event: NDKEvent) => void;
+  'mostro-info': (info: MostroInfo) => void;
+  'dm': (message: MostroMessage, sender: string) => void;
+  // Allow dynamic event names for action-orderId
   [key: string]: (...args: any[]) => void;
-  [key: symbol]: (...args: any[]) => void;
-}
+};
 
 export interface MostroOptions {
-  mostroPubKey: string;
+  mostroPubKey?: string;
   relays: string[];
   privateKey?: string;
   debug?: boolean;
+}
+
+export interface OrderSearchOptions {
+  /** Authors to filter by (public keys) */
+  authors?: string[];
+  /** Type of order (buy/sell) */
+  orderType?: string;
+  /** Currency code (e.g., 'USD', 'VES') */
+  currency?: string;
+  /** Status of the order */
+  status?: OrderStatus;
+  /** Platform identifier */
+  platform?: string;
+  /** Payment methods to filter by */
+  paymentMethods?: string[];
+  /** Document type (usually 'order' for P2P orders) */
+  documentType?: string;
 }
 
 export enum PublicKeyType {
@@ -38,15 +53,18 @@ export enum PublicKeyType {
 
 export class Mostro extends EventEmitter<MostroEvents> {
   private nostr: Nostr;
+  private mostroPubKey: string | undefined;
   private keyManager?: KeyManager;
   private activeOrders: Map<string, Order> = new Map();
   private pendingRequests: Map<number, PendingRequest> = new Map();
-  private nextRequestId = 1;
+  private nextRequestId = 0;
   private readyPromise: Promise<void>;
-  private readyResolve!: () => void;
+  private customOrderSubscriptions: Map<string, NDKSubscription> = new Map();
+  private options: MostroOptions;
 
-  constructor(private options: MostroOptions) {
+  constructor(options: MostroOptions) {
     super();
+    this.options = options;
     this.nostr = new Nostr(options.relays, options.debug || false);
 
     if (options.privateKey) {
@@ -54,26 +72,34 @@ export class Mostro extends EventEmitter<MostroEvents> {
       this.nostr.updatePrivKey(options.privateKey);
     }
 
-    this.readyPromise = new Promise((resolve) => {
-      this.readyResolve = resolve;
-    });
+    this.mostroPubKey = options.mostroPubKey;
 
     this.setupEventHandlers();
+
+    // Initialize readyPromise by calling connect immediately
+    this.readyPromise = this.connect();
   }
 
   private setupEventHandlers() {
     this.nostr.on('ready', this.onNostrReady.bind(this));
     this.nostr.on('public-message', this.handlePublicMessage.bind(this));
-    this.nostr.on('private-message', this.handlePrivateMessage.bind(this));
+    this.nostr.on('dm', this.handlePrivateMessage.bind(this));
+    // Subscribe to direct messages if private key is available
+    if (this.options.privateKey) {
+      this.nostr.subscribeDirectMessages();
+    }
   }
 
   private onNostrReady() {
-    if (this.options.debug) {
-      console.log('Mostro ready');
+    if (this.options.debug) console.log('Nostr ready');
+    // Subscribe to orders only if a mostroPubKey is provided
+    if (this.mostroPubKey) {
+      this.nostr.subscribeOrders(this.mostroPubKey);
+    } else {
+      // Perhaps subscribe with general filters if no specific mostro is targeted?
+      // Or emit a general 'ready' event for the client to decide?
+      this.emit('ready'); // Emit general ready if no Mostro pubkey specified
     }
-    this.nostr.subscribeOrders(this.options.mostroPubKey);
-    this.emit('ready');
-    this.readyResolve();
   }
 
   async connect(): Promise<void> {
@@ -81,62 +107,51 @@ export class Mostro extends EventEmitter<MostroEvents> {
     return this.readyPromise;
   }
 
-  private async handlePublicMessage(ev: NDKEvent) {
-    const tags = new Map(ev.tags.map((tag) => [tag[0], tag[1]]));
-    const type = tags.get('z');
-
-    if (type === 'order') {
-      const order = extractOrderFromEvent(ev);
-      if (order) {
-        if (order.status === OrderStatus.PENDING) {
-          this.activeOrders.set(order.id, order);
+  private handlePublicMessage = (event: NDKEvent): void => {
+    try {
+      if (event.kind === 4) {
+        const order = extractOrderFromEvent(event);
+        if (order) {
+          if (this.options.debug) console.log(`Received order update for ${order.id}:`, order);
+          this.emit('order-update', order, event);
         } else {
-          this.activeOrders.delete(order.id);
+          // Could be MostroInfo
+          const info = this.extractMostroInfoFromEvent(event);
+          if (info) {
+            if (this.options.debug) console.log('Received Mostro info:', info);
+            this.emit('mostro-info', info);
+          }
         }
-        this.emit('order-update', order, ev);
-      }
-    } else if (type === 'info') {
-      const info = this.extractInfoFromEvent(ev);
-      if (info) {
-        this.emit('info-update', info);
-      }
-    }
-  }
-
-  private async handlePrivateMessage(gift: GiftWrap, seal: Seal, rumor: Rumor) {
-    this.emit('peer-message', gift, seal, rumor);
-
-    if (this.isPendingRequest(rumor)) {
-      this.handlePendingRequest(rumor);
-    }
-  }
-
-  private isPendingRequest(rumor: Rumor): boolean {
-    try {
-      const message = JSON.parse(rumor.content);
-      return message?.order?.request_id !== undefined;
-    } catch {
-      return false;
-    }
-  }
-
-  private handlePendingRequest(rumor: Rumor) {
-    try {
-      const message = JSON.parse(rumor.content) as MostroMessage;
-      const requestId = message.order?.request_id;
-
-      if (requestId && this.pendingRequests.has(requestId)) {
-        const { resolve, timer } = this.pendingRequests.get(requestId)!;
-        clearTimeout(timer);
-        this.pendingRequests.delete(requestId);
-        resolve(message);
       }
     } catch (error) {
       if (this.options.debug) {
-        console.error('Error handling pending request:', error);
+        console.error('Error handling public message:', error);
       }
     }
-  }
+  };
+
+  private handlePrivateMessage = (sender: string, message: string): void => {
+    try {
+      const mostroMessage = JSON.parse(message) as MostroMessage;
+      if (this.options.debug) console.log(`Received DM from ${sender}:`, mostroMessage);
+
+      // Emit specific events based on message action/id for waitForAction
+      if (mostroMessage.order) {
+        const orderId = mostroMessage.order.id;
+        const action = mostroMessage.order.action;
+        if (orderId && action) {
+          const eventName = `${action}-${orderId}`;
+          // Emit with MostroMessage and sender pubkey
+          this.emit(eventName, mostroMessage, sender);
+        }
+      }
+      // Emit general DM event as well
+      this.emit('dm', mostroMessage, sender);
+
+    } catch (error) {
+      console.error('Error handling private message:', error, 'Original message:', message);
+    }
+  };
 
   async submitOrder(newOrder: NewOrder): Promise<MostroMessage> {
     if (!this.keyManager) {
@@ -256,22 +271,119 @@ export class Mostro extends EventEmitter<MostroEvents> {
     return Array.from(this.activeOrders.values());
   }
 
-  async waitForAction(action: Action, orderId: string, timeout: number = REQUEST_TIMEOUT): Promise<MostroMessage> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.removeListener('mostro-message', handler);
-        reject(new Error(`Timeout waiting for action ${action} for order ${orderId}`));
-      }, timeout);
+  async searchOrders(options: OrderSearchOptions): Promise<Order[]> {
+    const searchId = `search_${Date.now()}`;
+    
+    // Convert options to OrderFilters format, ensuring proper typing
+    const filters: OrderFilters = {
+      authors: options.authors || undefined,
+      orderType: options.orderType || undefined,
+      currency: options.currency || undefined,
+      status: options.status ? String(options.status) : undefined,
+      documentType: 'order', // Always filter for order documents
+      platform: options.platform || undefined,
+      paymentMethods: options.paymentMethods || undefined,
+    };
 
-      const handler = (mostroMessage: MostroMessage, ev: NDKEvent) => {
+    return new Promise<Order[]>((resolve) => {
+      const orders: Order[] = [];
+      const subscription = this.nostr.subscribeOrdersWithFilters(filters);
+      
+      // Store the subscription
+      this.customOrderSubscriptions.set(searchId, subscription);
+      
+      // Set timeout for search (default to 5 seconds)
+      setTimeout(() => {
+        this.closeOrderSearch(searchId);
+        resolve(orders);
+      }, 5000);
+      
+      // Listen for events
+      const handler = (event: NDKEvent) => {
+        const order = extractOrderFromEvent(event);
+        if (order) {
+          orders.push(order);
+        }
+      };
+      
+      subscription.on('event', handler);
+    });
+  }
+
+  private closeOrderSearch(searchId: string): void {
+    const subscription = this.customOrderSubscriptions.get(searchId);
+    if (subscription) {
+      subscription.stop();
+      this.customOrderSubscriptions.delete(searchId);
+    }
+  }
+
+  async searchBuyOrders(options: Omit<OrderSearchOptions, 'orderType'> = {}): Promise<Order[]> {
+    return this.searchOrders({
+      ...options,
+      orderType: 'buy',
+    });
+  }
+
+  async searchSellOrders(options: Omit<OrderSearchOptions, 'orderType'> = {}): Promise<Order[]> {
+    return this.searchOrders({
+      ...options,
+      orderType: 'sell',
+    });
+  }
+
+  async searchOrdersByCurrency(currency: string, options: Omit<OrderSearchOptions, 'currency'> = {}): Promise<Order[]> {
+    return this.searchOrders({
+      ...options,
+      currency,
+    });
+  }
+
+  async searchOrdersByPaymentMethod(paymentMethod: string | string[], options: Omit<OrderSearchOptions, 'paymentMethods'> = {}): Promise<Order[]> {
+    const paymentMethods = Array.isArray(paymentMethod) ? paymentMethod : [paymentMethod];
+    return this.searchOrders({
+      ...options,
+      paymentMethods,
+    });
+  }
+
+  async waitForOrderUpdate(orderId: string, timeoutMs: number = REQUEST_TIMEOUT): Promise<Order> {
+    return new Promise<Order>((resolve, reject) => {
+      const handler = (order: Order, _event: NDKEvent) => {
+        if (order.id === orderId) {
+          clearTimeout(timer);
+          this.off('order-update', handler);
+          resolve(order);
+        }
+      };
+      this.on('order-update', handler);
+
+      const timer = setTimeout(() => {
+        this.off('order-update', handler);
+        reject(new Error(`Timeout waiting for order update on order ${orderId}`));
+      }, timeoutMs);
+    });
+  }
+
+  async waitForAction(action: Action, orderId: string, timeoutMs: number = REQUEST_TIMEOUT): Promise<MostroMessage> {
+    return new Promise<MostroMessage>((resolve, reject) => {
+      const eventName = `${action}-${orderId}`;
+      // Define the handler function
+      const handler = (mostroMessage: MostroMessage, _sender: string) => {
+        // No need to parse again, already done in handlePrivateMessage
         if (mostroMessage.order?.action === action && mostroMessage.order.id === orderId) {
           clearTimeout(timer);
-          this.removeListener('mostro-message', handler);
+          this.off(eventName, handler); // Use the specific eventName
           resolve(mostroMessage);
         }
       };
+      // Listen on the specific event
+      this.on(eventName, handler);
 
-      this.on('mostro-message', handler);
+      const timer = setTimeout(() => {
+        this.off(eventName, handler);
+        reject(new Error(`Timeout waiting for action ${action} on order ${orderId}`));
+      }, timeoutMs);
     });
   }
 
@@ -299,7 +411,7 @@ export class Mostro extends EventEmitter<MostroEvents> {
     return [requestId, promise];
   }
 
-  private extractInfoFromEvent(ev: NDKEvent): MostroInfo | null {
+  private extractMostroInfoFromEvent(ev: NDKEvent): MostroInfo | null {
     try {
       const tags = new Map(ev.tags.map((tag) => [tag[0], tag[1]]));
       return {
@@ -337,5 +449,9 @@ export class Mostro extends EventEmitter<MostroEvents> {
 
   getNostr(): Nostr {
     return this.nostr;
+  }
+
+  disconnect(): void {
+    this.nostr.disconnect();
   }
 }
