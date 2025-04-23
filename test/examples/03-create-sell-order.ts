@@ -47,16 +47,17 @@ async function createSellOrderExample() {
       console.log('Esperando actualización del estado...');
 
       // Esperar a que la orden aparezca en el listado
-      const waitForOrder = () => new Promise<void>((resolve) => {
-        mostro.on('order-update', (order) => {
-          if (order.id === orderId) {
-            console.log('Orden publicada en la red!');
-            console.log('Detalles de la orden:');
-            console.log(order);
-            resolve();
-          }
+      const waitForOrder = () =>
+        new Promise<void>((resolve) => {
+          mostro.on('order-update', (order) => {
+            if (order.id === orderId) {
+              console.log('Orden publicada en la red!');
+              console.log('Detalles de la orden:');
+              console.log(order);
+              resolve();
+            }
+          });
         });
-      });
 
       // Establecer timeout de 30 segundos
       const timeoutPromise = new Promise<void>((_, reject) => {
@@ -65,7 +66,6 @@ async function createSellOrderExample() {
 
       await Promise.race([waitForOrder(), timeoutPromise]);
     }
-
   } catch (error) {
     console.error('Error durante la creación de la orden:', error);
   }

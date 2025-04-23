@@ -17,7 +17,7 @@ interface PendingRequest {
 type MostroEvents = {
   'order-update': (order: Order, event: NDKEvent) => void;
   'mostro-info': (info: MostroInfo) => void;
-  'dm': (message: MostroMessage, sender: string) => void;
+  dm: (message: MostroMessage, sender: string) => void;
   // Allow dynamic event names for action-orderId
   [key: string]: (...args: any[]) => void;
 };
@@ -147,7 +147,6 @@ export class Mostro extends EventEmitter<MostroEvents> {
       }
       // Emit general DM event as well
       this.emit('dm', mostroMessage, sender);
-
     } catch (error) {
       console.error('Error handling private message:', error, 'Original message:', message);
     }
@@ -273,7 +272,7 @@ export class Mostro extends EventEmitter<MostroEvents> {
 
   async searchOrders(options: OrderSearchOptions): Promise<Order[]> {
     const searchId = `search_${Date.now()}`;
-    
+
     // Convert options to OrderFilters format, ensuring proper typing
     const filters: OrderFilters = {
       authors: options.authors || undefined,
@@ -288,16 +287,16 @@ export class Mostro extends EventEmitter<MostroEvents> {
     return new Promise<Order[]>((resolve) => {
       const orders: Order[] = [];
       const subscription = this.nostr.subscribeOrdersWithFilters(filters);
-      
+
       // Store the subscription
       this.customOrderSubscriptions.set(searchId, subscription);
-      
+
       // Set timeout for search (default to 5 seconds)
       setTimeout(() => {
         this.closeOrderSearch(searchId);
         resolve(orders);
       }, 5000);
-      
+
       // Listen for events
       const handler = (event: NDKEvent) => {
         const order = extractOrderFromEvent(event);
@@ -305,7 +304,7 @@ export class Mostro extends EventEmitter<MostroEvents> {
           orders.push(order);
         }
       };
-      
+
       subscription.on('event', handler);
     });
   }
@@ -339,7 +338,10 @@ export class Mostro extends EventEmitter<MostroEvents> {
     });
   }
 
-  async searchOrdersByPaymentMethod(paymentMethod: string | string[], options: Omit<OrderSearchOptions, 'paymentMethods'> = {}): Promise<Order[]> {
+  async searchOrdersByPaymentMethod(
+    paymentMethod: string | string[],
+    options: Omit<OrderSearchOptions, 'paymentMethods'> = {},
+  ): Promise<Order[]> {
     const paymentMethods = Array.isArray(paymentMethod) ? paymentMethod : [paymentMethod];
     return this.searchOrders({
       ...options,

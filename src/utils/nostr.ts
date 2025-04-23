@@ -90,10 +90,7 @@ export class Nostr extends EventEmitter<NostrEvents> {
       since: Math.floor(Date.now() / 1000) - 24 * 60 * 60 * 14,
     };
 
-    const subscription = this.ndk.subscribe(
-      filter,
-      { closeOnEose: false },
-    );
+    const subscription = this.ndk.subscribe(filter, { closeOnEose: false });
 
     subscription.on('event', (event: NDKEvent) => {
       this.emit('public-message', event);
@@ -118,10 +115,7 @@ export class Nostr extends EventEmitter<NostrEvents> {
       ndkFilters.authors = filters.authors;
     }
 
-    const subscription = this.ndk.subscribe(
-      ndkFilters,
-      { closeOnEose: false },
-    );
+    const subscription = this.ndk.subscribe(ndkFilters, { closeOnEose: false });
 
     subscription.on('event', async (event: NDKEvent) => {
       if (!this.isOrderEvent(event, filters)) {
@@ -189,10 +183,10 @@ export class Nostr extends EventEmitter<NostrEvents> {
       const pmTag = tagMap.get('pm');
       if (!pmTag) return false;
 
-      const orderPms = pmTag.split(',').map(pm => pm.trim().toLowerCase());
-      const filterPms = filters.paymentMethods.map(pm => pm.toLowerCase());
+      const orderPms = pmTag.split(',').map((pm) => pm.trim().toLowerCase());
+      const filterPms = filters.paymentMethods.map((pm) => pm.toLowerCase());
 
-      if (!filterPms.some(pm => orderPms.includes(pm))) {
+      if (!filterPms.some((pm) => orderPms.includes(pm))) {
         return false;
       }
     }
@@ -216,10 +210,7 @@ export class Nostr extends EventEmitter<NostrEvents> {
       since: Math.floor(Date.now() / 1000),
     };
 
-    const subscription = this.ndk.subscribe(
-      filter,
-      { closeOnEose: false }
-    );
+    const subscription = this.ndk.subscribe(filter, { closeOnEose: false });
 
     subscription.on('event', async (event: NDKEvent) => {
       if (event.kind === 4 && event.pubkey !== myPubKey) {
@@ -321,21 +312,21 @@ export class Nostr extends EventEmitter<NostrEvents> {
       try {
         let decodedKey: Uint8Array | undefined = undefined;
         if (privKey.startsWith('nsec')) {
-            const decoded = nip19.decode(privKey);
-            if (decoded.type === 'nsec') {
-                decodedKey = decoded.data;
-            } else {
-                throw new Error('Invalid nsec key provided');
-            }
+          const decoded = nip19.decode(privKey);
+          if (decoded.type === 'nsec') {
+            decodedKey = decoded.data;
+          } else {
+            throw new Error('Invalid nsec key provided');
+          }
         } else if (/^[0-9a-fA-F]{64}$/.test(privKey)) {
-            decodedKey = Buffer.from(privKey, 'hex');
+          decodedKey = Buffer.from(privKey, 'hex');
         } else {
-            throw new Error('Invalid private key format. Use hex or nsec.');
+          throw new Error('Invalid private key format. Use hex or nsec.');
         }
         this.privateKey = decodedKey;
         if (this.privateKey && this.debug) console.log('Private key updated.');
       } catch (e) {
-        console.error("Error decoding private key:", e);
+        console.error('Error decoding private key:', e);
         this.privateKey = undefined;
       }
     } else {
